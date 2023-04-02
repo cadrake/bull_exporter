@@ -1,26 +1,25 @@
 import Bull = require('bull');
 import { Registry } from 'prom-client';
 
-import { makeGuages, QueueGauges } from '../src/queueGauges';
+import { makeGauges, QueueGauges } from '../src/queueGauges';
 
 export interface TestData {
   name: string;
   queue: Bull.Queue;
   prefix: string;
-  guages: QueueGauges;
+  gauges: QueueGauges;
   registry: Registry;
 }
 
-export function makeQueue(name: string = 'TestQueue', prefix: string = 'test-queue'): TestData {
-
+export function makeQueue(redisUrl: string, name: string = 'TestQueue', prefix: string = 'test-queue'): TestData {
   const registry = new Registry();
-  const queue = new Bull(name, { prefix });
+  const queue = new Bull(name, redisUrl, { prefix });
 
   return {
     name,
     queue,
     prefix,
     registry,
-    guages: makeGuages('test_stat_', [registry]),
+    gauges: makeGauges('test_stat_', [registry]),
   };
 }

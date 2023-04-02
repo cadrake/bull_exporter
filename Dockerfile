@@ -1,7 +1,7 @@
-FROM node:10-alpine as build-env
+FROM node:18-bullseye-slim as build-env
 
-RUN mkdir -p /src
-WORKDIR /src
+RUN mkdir -p /build
+WORKDIR /build
 
 COPY package.json .
 COPY yarn.lock .
@@ -11,17 +11,9 @@ COPY . .
 RUN node_modules/.bin/tsc -p .
 RUN yarn install --pure-lockfile --production
 
-FROM node:10-alpine
-RUN apk --no-cache add tini bash
-ENTRYPOINT ["/sbin/tini", "--"]
+FROM gcr.io/distroless/nodejs:18
 
-RUN mkdir -p /src
-RUN chown -R nobody:nogroup /src
-WORKDIR /src
-USER nobody
+COPY --from=build-env /build/node_modules /app/node_modules
+COPY --from=build-env /build/dist /app/dist
 
-COPY /setup/docker/main.sh /src/
-COPY --chown=nobody:nogroup --from=build-env /src/node_modules /src/node_modules
-COPY --chown=nobody:nogroup --from=build-env /src/dist /src/dist
-
-CMD /src/main.sh
+CMD ["/app/dist/src/index.js"]
