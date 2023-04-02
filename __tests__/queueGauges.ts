@@ -1,17 +1,22 @@
 import * as bull from 'bull';
 
 import { getJobCompleteStats, getStats } from '../src/queueGauges';
-
-import { TestData } from './create.util';
+import { makeQueue, TestData } from './create.util';
 import { getCurrentTestHash } from './setup.util';
 
 let testData: TestData;
 
+declare global {
+  var redisUrl: string;
+}
+
 beforeEach(async () => {
-  jest.resetModuleRegistry();
-  const { makeQueue } = await import('./create.util');
-  const hash = getCurrentTestHash();
-  testData = makeQueue(hash);
+  jest.resetModules();
+  try {
+    testData = makeQueue(globalThis.redisUrl, getCurrentTestHash());
+  } catch (err) {
+    console.log('error: %s', err);
+  }
 });
 
 afterEach(async () => {
@@ -29,15 +34,14 @@ it('should list 1 queued job', async () => {
     name,
     queue,
     prefix,
-    guages,
+    gauges,
     registry,
   } = testData;
 
   await queue.add({ a: 1 });
+  await getStats(prefix, name, queue, gauges);
 
-  await getStats(prefix, name, queue, guages);
-
-  expect(registry.metrics()).toMatchSnapshot();
+  expect(await registry.metrics()).toMatchSnapshot();
 });
 
 it('should list 1 completed job', async () => {
@@ -45,20 +49,21 @@ it('should list 1 completed job', async () => {
     name,
     queue,
     prefix,
-    guages,
+    gauges,
     registry,
   } = testData;
 
   queue.process(async (jobInner: bull.Job<unknown>) => {
     expect(jobInner).toMatchObject({ data: { a: 1 } });
   });
+
   const job = await queue.add({ a: 1 });
   await job.finished();
 
-  await getStats(prefix, name, queue, guages);
-  await getJobCompleteStats(prefix, name, job, guages);
+  await getStats(prefix, name, queue, gauges);
+  await getJobCompleteStats(prefix, name, job, gauges);
 
-  expect(registry.metrics()).toMatchSnapshot();
+  expect(await registry.metrics()).toMatchSnapshot();
 });
 
 it('should list 1 completed job with delay', async () => {
@@ -66,26 +71,23 @@ it('should list 1 completed job with delay', async () => {
     name,
     queue,
     prefix,
-    guages,
+    gauges,
     registry,
   } = testData;
 
   queue.process(async (jobInner: bull.Job<unknown>) => {
     expect(jobInner).toMatchObject({ data: { a: 1 } });
   });
+
   const job = await queue.add({ a: 1 });
   await job.finished();
 
-  // TODO: https://github.com/DefinitelyTyped/DefinitelyTyped/pull/31567
-  // TODO: file bug with bull? finishedOn and processedOn are not set when we call finish
-  const doneJob: any = await queue.getJob(job.id);
-  // lie about job duration
-  doneJob.finishedOn = doneJob.processedOn + 1000;
+  job.finishedOn = (job.processedOn ?? 0) + 1000;
 
-  await getStats(prefix, name, queue, guages);
-  await getJobCompleteStats(prefix, name, doneJob, guages);
+  await getStats(prefix, name, queue, gauges);
+  await getJobCompleteStats(prefix, name, job, gauges);
 
-  expect(registry.metrics()).toMatchSnapshot();
+  expect(await registry.metrics()).toMatchSnapshot();
 });
 
 it('should list 1 failed job', async () => {
@@ -93,7 +95,7 @@ it('should list 1 failed job', async () => {
     name,
     queue,
     prefix,
-    guages,
+    gauges,
     registry,
   } = testData;
 
@@ -105,9 +107,9 @@ it('should list 1 failed job', async () => {
 
   await expect(job.finished()).rejects.toThrow(/expected/);
 
-  await getStats(prefix, name, queue, guages);
+  await getStats(prefix, name, queue, gauges);
 
-  expect(registry.metrics()).toMatchSnapshot();
+  expect(await registry.metrics()).toMatchSnapshot();
 });
 
 it('should list 1 delayed job', async () => {
@@ -115,15 +117,15 @@ it('should list 1 delayed job', async () => {
     name,
     queue,
     prefix,
-    guages,
+    gauges: gauges,
     registry,
   } = testData;
 
   await queue.add({ a: 1 }, { delay: 100_000 });
 
-  await getStats(prefix, name, queue, guages);
+  await getStats(prefix, name, queue, gauges);
 
-  expect(registry.metrics()).toMatchSnapshot();
+  expect(await registry.metrics()).toMatchSnapshot();
 });
 
 it('should list 1 active job', async () => {
@@ -131,14 +133,14 @@ it('should list 1 active job', async () => {
     name,
     queue,
     prefix,
-    guages,
+    gauges,
     registry,
   } = testData;
 
   let jobStartedResolve!: () => void;
   let jobDoneResolve!: () => void;
-  const jobStartedPromise = new Promise(resolve => jobStartedResolve = resolve);
-  const jobDonePromise = new Promise(resolve => jobDoneResolve = resolve);
+  const jobStartedPromise = new Promise<void>(resolve => jobStartedResolve = resolve);
+  const jobDonePromise = new Promise<void>(resolve => jobDoneResolve = resolve);
 
   queue.process(async () => {
     jobStartedResolve();
@@ -147,11 +149,11 @@ it('should list 1 active job', async () => {
   const job = await queue.add({ a: 1 });
 
   await jobStartedPromise;
-  await getStats(prefix, name, queue, guages);
-  expect(registry.metrics()).toMatchSnapshot();
+  await getStats(prefix, name, queue, gauges);
+  expect(await registry.metrics()).toMatchSnapshot();
   jobDoneResolve();
   await job.finished();
 
-  await getStats(prefix, name, queue, guages);
-  expect(registry.metrics()).toMatchSnapshot();
+  await getStats(prefix, name, queue, gauges);
+  expect(await registry.metrics()).toMatchSnapshot();
 });

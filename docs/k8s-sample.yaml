@@ -40,9 +40,9 @@ spec:
               drop:
                 - all
           env:
-              # space delimited list of queues
+            # space delimited list of queues
             - name: EXPORTER_QUEUES
-              value: "mail job_one video audio"
+              value: "mail,job_one,video,audio"
 
               # find the redis service in the cluster
             - name: EXPORTER_REDIS_URL
@@ -65,8 +65,8 @@ metadata:
     app: bull
     role: exporter
   annotations:
-    prometheus.io/scrape: 'true'
-    prometheus.io/port: '5959'
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "5959"
 spec:
   type: ClusterIP
   ports:

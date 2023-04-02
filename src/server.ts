@@ -5,14 +5,15 @@ import { v4 as uuid } from 'uuid';
 
 import { logger } from './logger';
 import { MetricCollector } from './metricCollector';
-import { Options } from './options';
 
 function calcDuration(start: [number, number]): number {
   const diff = process.hrtime(start);
   return diff[0] * 1e3 + diff[1] * 1e-6;
 }
 
-export async function makeServer(opts: Options): Promise<express.Application> {
+export async function makeServer(collector: MetricCollector): Promise<express.Application> {
+  collector.collectJobCompletions();
+
   const app = express();
   app.disable('x-powered-by');
 
@@ -46,28 +47,12 @@ export async function makeServer(opts: Options): Promise<express.Application> {
       const data = {
         res,
         duration: calcDuration(start),
-
       };
       reqLog.warn(data, 'request socket closed');
     });
 
     next();
-
   });
-
-  const collector = new MetricCollector(opts._, {
-    logger,
-    metricPrefix: opts.metricPrefix,
-    redis: opts.url,
-    prefix: opts.prefix,
-    autoDiscover: opts.autoDiscover,
-  });
-
-  if (opts.autoDiscover) {
-    await collector.discoverAll();
-  }
-
-  collector.collectJobCompletions();
 
   app.post('/discover_queues', (_req: express.Request, res: express.Response, next: express.NextFunction) => {
     collector.discoverAll()
@@ -91,9 +76,9 @@ export async function makeServer(opts: Options): Promise<express.Application> {
 
   app.get('/metrics', (_req: express.Request, res: express.Response, next: express.NextFunction) => {
     collector.updateAll()
-      .then(() => {
+      .then(async () => {
         res.contentType(promClient.register.contentType);
-        res.send(promClient.register.metrics());
+        res.send(await promClient.register.metrics());
       })
       .catch(err => next(err));
   });
@@ -108,17 +93,18 @@ export async function makeServer(opts: Options): Promise<express.Application> {
   return app;
 }
 
-export async function startServer(opts: Options): Promise<{ done: Promise<void> }> {
-  const app = await makeServer(opts);
+export async function startServer(bindAddress: string, bindPort: number, collector: MetricCollector): Promise<{ done: Promise<void> }> {
+  const app = await makeServer(collector);
 
   let server: http.Server;
-  await new Promise((resolve, reject) => {
-    server = app.listen(opts.port, opts.bindAddress, (err: any) => {
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(bindPort, bindAddress, () => {
+      logger.info(`Running on ${bindAddress}:${bindPort}`);
+    }).on('error', (err) => {
       if (err) {
         reject(err);
         return;
       }
-      logger.info(`Running on ${opts.bindAddress}:${opts.port}`);
       resolve();
     });
   });
