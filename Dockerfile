@@ -1,15 +1,15 @@
 FROM node:18-bullseye-slim as build-env
+ENV NODE_ENV=production
 
 RUN mkdir -p /build
 WORKDIR /build
 
 COPY package.json .
 COPY yarn.lock .
-RUN yarn install --pure-lockfile
+RUN yarn install --frozen-lockfile --prefer-offline && yarn cache clean
 
 COPY . .
 RUN node_modules/.bin/tsc -p .
-RUN yarn install --pure-lockfile --production
 
 FROM gcr.io/distroless/nodejs:18
 
