@@ -6,7 +6,8 @@ WORKDIR /build
 
 COPY package.json .
 COPY yarn.lock .
-RUN yarn install --frozen-lockfile --prefer-offline && yarn cache clean
+RUN npm install tsc
+RUN yarn add typescript tsc ts-node && yarn install --frozen-lockfile --prefer-offline && yarn cache clean
 
 COPY . .
 RUN node_modules/.bin/tsc -p .
