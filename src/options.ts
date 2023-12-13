@@ -1,21 +1,33 @@
+import YAML from 'yaml';
 import yargs from 'yargs';
-
+import { logger } from './logger';
 import { version } from '../package.json';
+import * as fs from 'fs';
 
-export interface ExporterOptions {
-  url: string;
-  prefix: string;
-  metricPrefix: string;
-  once: boolean;
-  port: number;
-  bindAddress: string;
-  autoDiscover: boolean;
-  caCertFile: string;
-  clientCertFile: string;
-  clientPrivateKeyFile: string;
-  username: string;
-  password: string;
-  queues: string[];
+export class ExporterOptions {
+  url: string = 'redis://127.0.0.1:6379'
+  listenAddress: string = '0.0.0.0:9538'
+  metricPrefix: string = 'bull_queue_'
+  once: boolean = false
+  tls?: TlsSettings
+  auth?: AuthSettings
+  queueTrackers: Map<string, QueueTracker> = new Map<string, QueueTracker>()
+}
+
+export class QueueTracker {
+  autoDiscover: boolean = false
+  queues: string[] = []
+}
+
+class TlsSettings {
+  caCertFile: string = ''
+  clientCertFile: string = ''
+  clientPrivateKeyFile: string = ''
+}
+
+class AuthSettings {
+  username: string = ''
+  password: string = ''
 }
 
 class OptionsBuilderFactory {
@@ -26,114 +38,196 @@ class OptionsBuilderFactory {
 
 class OptionsBuilder {
   opts: ExporterOptions
+  defaultPrefix: string;
+  defaultAutoDiscover: boolean
+  defaultQueues: string[]
 
   constructor() {
-    // Defaults for the options
-    this.opts = {
-      url: 'redis://127.0.0.1:6379',
-      prefix: 'bull',
-      metricPrefix: 'bull_queue_',
-      once: false,
-      port: 9538,
-      bindAddress: '0.0.0.0',
-      autoDiscover: false,
-      caCertFile: '',
-      clientCertFile: '',
-      clientPrivateKeyFile: '',
-      username: '',
-      password: '',
-      queues: [],
-    } as ExporterOptions;
+    this.opts = new ExporterOptions()
+    this.defaultPrefix = "bull"
+    this.defaultAutoDiscover = false
+    this.defaultQueues = []
   }
 
-  readEnv(): OptionsBuilder {
+  loadConfigFileFromEnv(): OptionsBuilder {
+    const configFile = process.env.EXPORTER_CONFIG_FILE
+    if (configFile) {
+      this.readConfigFile(configFile)
+    }
+    return this
+  }
+
+  updateFromEnv(): OptionsBuilder {
     const envOptions = Object.fromEntries(Object.entries({
       url: process.env.EXPORTER_REDIS_URL,
-      prefix: process.env.EXPORTER_PREFIX,
       metricPrefix: process.env.EXPORTER_STAT_PREFIX,
-      port: process.env.EXPORTER_PORT,
-      bindAddress: process.env.EXPORTER_BIND_ADDRESS,
-      autoDiscover: (process.env.EXPORTER_AUTODISCOVER === 'true'),
+      listenAddress: process.env.EXPORTER_LISTEN_ADDRESS,
       caCertFile: process.env.EXPORTER_CA_CERT_FILE,
       clientCertFile: process.env.EXPORTER_CLIENT_CERT_FILE,
       clientPrivateKeyFile: process.env.EXPORTER_CLIENT_PRIVATE_KEY_FILE,
-      username: process.env.EXPORTER_AUTH_USER,
-      password: process.env.EXPORTER_AUTH_PASSWORD,
-      queues: process?.env?.EXPORTER_QUEUES?.split(',').map((str) => str.trim()),
-    }).filter(([_, v]) => v != null));
+    }).filter(([_, v]) => v != null))
 
-    Object.assign(this.opts, envOptions);
+    this.defaultPrefix = process?.env?.EXPORTER_PREFIX || this.defaultPrefix,
+    this.defaultAutoDiscover = !!process?.env?.EXPORTER_AUTODISCOVER || this.defaultAutoDiscover,
+    this.defaultQueues = process?.env?.EXPORTER_QUEUES?.split(',').map((str) => str.trim()) || this.defaultQueues
+
+    if (process.env.EXPORTER_AUTH_USER || process.env.EXPORTER_AUTH_PASSWORD) {
+      if (!this.opts.auth) {
+        this.opts.auth = {
+          username: process.env.EXPORTER_AUTH_USER,
+          password: process.env.EXPORTER_AUTH_PASSWORD,
+        } as AuthSettings
+      } else {
+        this.opts.auth.username = process.env.EXPORTER_AUTH_USER || this.opts.auth.username
+        this.opts.auth.password = process.env.EXPORTER_AUTH_PASSWORD || this.opts.auth.password
+      }
+    }
+
+    Object.assign(this.opts, envOptions)
 
     return this;
   }
 
+  // TODO: Figure out how to have yargs read into an object instead of generating extraneous map keys
   updateFromArgs(...args: string[]): OptionsBuilder {
     const cliOptions = yargs.version(version)
       .alias('V', 'version')
       .options({
         url: {
-          alias: 'u',
+          alias: 'h',
           description: 'A redis connection url',
+          type: 'string'
         },
-        prefix: {
-          alias: 'f',
-          description: 'Prefix of all bull queues to monitor'
+        defaultPrefix: {
+          alias: 'p',
+          description: 'Prefix of all bull queues to monitor',
+          type: 'string'
         },
         metricPrefix: {
           alias: 'm',
           description: 'prefix for all exported metrics',
+          type: 'string'
         },
         once: {
-          alias: 'n',
-          type: 'boolean',
+          alias: 'o',
           description: 'Print stats and exit without starting a server',
+          type: 'boolean',
         },
-        port: {
-          description: 'Port to expose metrics on'
-        },
-        autoDiscover: {
+        defaultAutoDiscover: {
           alias: 'a',
           description: 'Set to auto discover bull queues',
           type: 'boolean',
         },
-        queues: {
+        defaultQueues: {
           alias: 'q',
-          type: 'array',
           description: 'Comma separated list of queues to monitor',
-          coerce: arr => {
-            return arr.flatMap((v: string) => v.split(','));
+          type: 'array',
+          coerce: value => {
+            return value.flatMap((v: string) => v.split(',').map((str) => str.trim()));
           },
         },
-        bindAddress: {
+        listenAddress: {
           alias: 'b',
           description: 'Address to listen on',
+          type: 'string'
         },
         caCertFile: {
+          alias: 'ca-cert',
           description: 'Additional certificate authority certificates to load when starting the exporter',
+          type: 'string'
         },
         clientCertFile: {
+          alias: 'client-cert',
           description: 'Client certificate for tls connections with Redis',
+          type: 'string'
         },
         clientPrivateKeyFile: {
+          alias: 'client-pk',
           description: 'Client private key for tls connections with Redis',
+          type: 'string'
         },
         username: {
-          alias: 'u',
+          alias: 'user',
           description: 'User name to use when interacting with Redis AUTH commands',
+          type: 'string'
         },
         password: {
-          alias: 'p',
+          alias: 'pass',
           description: 'Password to use when interacting with Redis AUTH commands',
+          type: 'string'
         },
-      }).parse(args);
+        configFile: {
+          alias: 'config',
+          description: 'Config file to read settings from',
+          type: 'string'
+        },
+      })
+      .parseSync(args);
 
-    Object.assign(this.opts, cliOptions);
+    if (cliOptions.configFile) {
+      this.readConfigFile(cliOptions.configFile)
+    }
 
+    // Remove configFile field before assigning
+    const { configFile, defaultPrefix, defaultAutoDiscover, defaultQueues, ...cliSettings } = cliOptions
+
+    this.defaultPrefix = defaultPrefix || this.defaultPrefix
+    this.defaultAutoDiscover = defaultAutoDiscover || this.defaultAutoDiscover
+    this.defaultQueues = defaultQueues || this.defaultQueues
+
+    Object.assign(this.opts, cliSettings);
     return this;
   }
 
   values(): ExporterOptions {
+    // Save defaults to tracker map if no trackers are configured yet
+    if (this.opts.queueTrackers.size == 0) {
+      logger.info(`configuring default tracker with prefix ${this.defaultPrefix}`)
+      this.opts.queueTrackers.set(this.defaultPrefix, {
+        autoDiscover: this.defaultAutoDiscover,
+        queues: this.defaultQueues,
+      })
+    }
+
     return this.opts
+  }
+
+  private readConfigFile(configFile: string) {
+    // Load config yaml and initialize fields
+    try {
+      logger.info(`loading configuration from ${configFile}`)
+      const parsedOpts = YAML.parse(fs.readFileSync(configFile, 'utf-8'))
+
+      // Save any configured trackers or queues
+      if ('queues' in parsedOpts) {
+        this.defaultQueues = parsedOpts['queues']
+      }
+
+      if ('queueTrackers' in parsedOpts) {
+        const trackerMap = new Map<string, QueueTracker>(Object.entries(parsedOpts['queueTrackers']))
+        trackerMap.forEach((tracker: QueueTracker, prefix: string) => {
+          logger.info(`found tracker for prefix ${prefix}`)
+          this.opts.queueTrackers.set(prefix, tracker)
+        })
+      }
+
+      // Read defaults
+      this.defaultPrefix = parsedOpts['prefix'] || this.defaultPrefix
+      this.defaultAutoDiscover = parsedOpts['autoDiscover'] || this.defaultAutoDiscover
+
+      // Clean up the parsed values to assign to the main options
+      const validOptions = Object.fromEntries(Object.entries({ ...parsedOpts })
+        .filter(([k, v]) => !(['queueTrackers', 'queues', 'prefix', 'autoDiscover'].includes(k)) && v != null))
+      Object.assign(this.opts, validOptions);
+    } catch (err) {
+      logger.error('failed loading config')
+      if (err instanceof YAML.YAMLParseError) {
+        logger.error(`error parsing yaml: ${err.message} on line ${err.linePos}`)
+      } else if (err instanceof Error) {
+        logger.error(`unknown error reading config file: ${err.message}`)
+      }
+      throw err
+    }
   }
 }
 

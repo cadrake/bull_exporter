@@ -2,30 +2,24 @@ import promClient from 'prom-client';
 
 import { Options, ExporterOptions } from './options';
 import { logger } from './logger';
-import { MetricCollector } from './metricCollector';
+import { MetricCollector, MetricCollectorOptions } from './metricCollector';
 import { startServer } from './server';
 
 export async function initCollector(opts: ExporterOptions): Promise<MetricCollector> {
-  const collector = new MetricCollector(opts.queues, {
+  const collectorOptions = {
     logger,
     metricPrefix: opts.metricPrefix,
     redis: opts.url,
-    prefix: opts.prefix,
-    autoDiscover: opts.autoDiscover,
-    caCertFile: opts.caCertFile,
-    clientCertFile: opts.clientCertFile,
-    clientPrivateKeyFile: opts.clientPrivateKeyFile,
-    username: opts.username,
-    password: opts.password,
-  });
+    caCertFile: opts.tls?.caCertFile || '',
+    clientCertFile: opts.tls?.clientCertFile || '',
+    clientPrivateKeyFile: opts.tls?.clientPrivateKeyFile || '',
+    username: opts.auth?.username || '',
+    password: opts.auth?.password || '',
+  } as MetricCollectorOptions
 
+  const collector = new MetricCollector(collectorOptions, opts.queueTrackers);
   logger.info('Initializing metrics collector');
-
-  if (opts.autoDiscover) {
-    logger.info('Running queue autodiscovery');
-    await collector.discoverAll();
-    logger.info('Queue autodiscovery complete');
-  }
+  await collector.initQueueTrackers()
 
   return collector;
 }
@@ -38,25 +32,26 @@ export async function printOnce(collector: MetricCollector): Promise<void> {
   await promClient.register.metrics().then((metrics) => console.log(metrics));
 }
 
-export async function runServer(bindAddress: string, bindPort: number, collector: MetricCollector): Promise<void> {
-  const { done } = await startServer(bindAddress, bindPort, collector);
+export async function runServer(listenAddress: string, collector: MetricCollector): Promise<void> {
+  const { done } = await startServer(listenAddress, collector);
   await done;
 }
 
 export async function main(...args: string[]): Promise<void> {
-  logger.info('Reading configuration');
-
   const opts = Options.newOptions()
-    .readEnv()
+    .loadConfigFileFromEnv()
+    .updateFromEnv()
     .updateFromArgs(...args)
     .values();
 
   const collector = await initCollector(opts);
 
+  logger.info('Collector initialization complete')
+
   if (opts.once) {
     await printOnce(collector);
   } else {
-    await runServer(opts.bindAddress, opts.port, collector);
+    await runServer(opts.listenAddress, collector);
   }
 }
 

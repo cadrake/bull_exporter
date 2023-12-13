@@ -61,7 +61,7 @@ export function makeGauges(statPrefix: string, registers: Registry[]): QueueGaug
 
 export async function getJobCompleteStats(prefix: string, name: string, job: bull.Job, gauges: QueueGauges): Promise<void> {
   if (!job.finishedOn) {
-    logger.info('Job is not complete');
+    logger.info('job is not complete');
     return;
   }
   const duration = job.finishedOn - (job.processedOn ?? 0);
@@ -70,7 +70,7 @@ export async function getJobCompleteStats(prefix: string, name: string, job: bul
 
 export async function getStats(prefix: string, name: string, queue: bull.Queue, gauges: QueueGauges): Promise<void> {
   return queue.getJobCounts()
-    .then((counts) => {
+    .then((counts: bull.JobCounts) => {
       const { completed, active, delayed, failed, waiting } = counts;
 
       gauges.completed.set({ prefix, queue: name }, completed);

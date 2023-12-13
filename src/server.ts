@@ -54,8 +54,8 @@ export async function makeServer(collector: MetricCollector): Promise<express.Ap
     next();
   });
 
-  app.post('/discover_queues', (_req: express.Request, res: express.Response, next: express.NextFunction) => {
-    collector.discoverAll()
+  app.post('/discover_queues/:prefix', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    collector.discoverAll(req.params.prefix)
       .then(() => {
         res.send({
           ok: true,
@@ -93,13 +93,14 @@ export async function makeServer(collector: MetricCollector): Promise<express.Ap
   return app;
 }
 
-export async function startServer(bindAddress: string, bindPort: number, collector: MetricCollector): Promise<{ done: Promise<void> }> {
+export async function startServer(listenAddress: string, collector: MetricCollector): Promise<{ done: Promise<void> }> {
   const app = await makeServer(collector);
 
   let server: http.Server;
   await new Promise<void>((resolve, reject) => {
-    server = app.listen(bindPort, bindAddress, () => {
-      logger.info(`Running on ${bindAddress}:${bindPort}`);
+    var [ bindAddress, bindPort ] = listenAddress.split(':')
+    server = app.listen(Number(bindPort), bindAddress, () => {
+      logger.info(`running on ${bindAddress}:${bindPort}`);
     }).on('error', (err) => {
       if (err) {
         reject(err);

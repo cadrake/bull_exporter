@@ -7,13 +7,13 @@ import { register as globalRegister, Registry } from 'prom-client';
 import { ConnectionOptions } from 'tls';
 
 import { logger as globalLogger } from './logger';
+import { QueueTracker } from './options';
 import { getJobCompleteStats, getStats, makeGauges, QueueGauges } from './queueGauges';
 
 export interface MetricCollectorOptions extends Omit<bull.QueueOptions, 'redis'> {
   logger: Logger;
   redis: string;
   metricPrefix: string;
-  autoDiscover: boolean;
   caCertFile: string;
   clientCertFile: string;
   clientPrivateKeyFile: string;
@@ -28,28 +28,24 @@ export interface QueueData<T = unknown> {
 }
 
 export class MetricCollector {
-
   private readonly logger: Logger;
-
   private readonly defaultRedisClient: Redis;
   private readonly redisOptions: RedisOptions;
-  private readonly bullOpts: Omit<bull.QueueOptions, 'redis'>;
+  private readonly trackers: Map<string, QueueTracker>;
   private readonly queuesByName: Map<string, QueueData<unknown>> = new Map();
+  private readonly myListeners: Set<(id: string) => Promise<void>> = new Set();
+  private readonly gauges: QueueGauges;
 
   private get queues(): QueueData<unknown>[] {
     return [...this.queuesByName.values()];
   }
 
-  private readonly myListeners: Set<(id: string) => Promise<void>> = new Set();
-
-  private readonly gauges: QueueGauges;
-
   constructor(
-    queueNames: string[],
     opts: MetricCollectorOptions,
+    trackers: Map<string, QueueTracker>,
     registers: Registry[] = [globalRegister],
   ) {
-    const { logger, redis, metricPrefix, ...extraOpts } = opts;
+    const { logger, metricPrefix } = opts;
 
     this.logger = logger || globalLogger;
     this.redisOptions = this.parseRedisOptions(opts);
@@ -57,9 +53,61 @@ export class MetricCollector {
     this.defaultRedisClient = new Redis(this.redisOptions);
     this.defaultRedisClient.setMaxListeners(32);
 
-    this.bullOpts = { prefix: extraOpts.prefix }
-    this.addToQueueSet(queueNames);
+    this.trackers = trackers
     this.gauges = makeGauges(metricPrefix, registers);
+  }
+
+  public async discoverAll(prefix: string): Promise<void> {
+    const keyPattern = new RegExp(`^${prefix}:([^:]+):(id|failed|active|waiting|stalled-check)$`);
+    const keyStream = this.defaultRedisClient.scanStream({
+      match: `${prefix}:*:*`,
+    });
+
+    return new Promise<void>((resolve, _) => {
+      keyStream.on('data', async (keys: string[]) => {
+        keys.forEach((key) => {
+          const match = keyPattern.exec(key);
+          if (match?.[1]) {
+            this.logger.info(`discovered queue ${match[1]}`);
+            this.addToQueueSet(prefix, [match[1]]);
+          }
+        })
+      })
+
+      keyStream.on('end', () => {
+        resolve();
+      });
+    }).catch((err) => {
+      this.logger.error('Error scanning redis keys: %s', err);
+    });
+  }
+
+  public collectJobCompletions(): void {
+    this.queues.forEach((q) => {
+      const cb = this.onJobComplete.bind(this, q);
+      this.myListeners.add(cb);
+      q.queue.on('global:completed', cb);
+    });
+  }
+
+  public async updateAll(): Promise<void> {
+    await Promise.all(this.queues.map(q => getStats(q.prefix, q.name, q.queue, this.gauges)));
+  }
+
+  public async ping(): Promise<void> {
+    await this.defaultRedisClient.ping();
+  }
+
+  public async close(): Promise<void> {
+    this.defaultRedisClient.disconnect();
+
+    this.queues.forEach((q) => {
+      this.myListeners.forEach((l) => {
+        (q.queue as any as EventEmitter).removeListener('global:completed', l);
+      });
+    });
+
+    await Promise.all(this.queues.map(q => q.queue.close()));
   }
 
   private parseRedisOptions(opts: MetricCollectorOptions): RedisOptions {
@@ -114,52 +162,43 @@ export class MetricCollector {
     if (_type === 'client') {
       return this.defaultRedisClient!;
     }
-
     return new Redis(this.redisOptions);
   }
 
-  private addToQueueSet(names: string[]): void {
+  public async initQueueTrackers(): Promise<void> {
+    for (const [prefix, tracker] of this.trackers) {
+      this.logger.info(`Initializing tracker for ${prefix}`)
+
+      if (tracker.autoDiscover) {
+        this.logger.info(`Running queue autodiscovery for ${prefix}`);
+        await this.discoverAll(prefix)
+        this.logger.info('Queue autodiscovery complete');
+      }
+
+      if (tracker.queues && (tracker.queues.length > 0)) {
+        this.addToQueueSet(prefix, tracker.queues)
+      }
+    }
+  }
+
+  private addToQueueSet(prefix: string, names: string[]): void {
     names.forEach((name) => {
       if (this.queuesByName.has(name)) {
+        this.logger.info(`skipping ${prefix}:${name}, queue already monitored`)
         return;
       }
 
       this.queuesByName.set(name, {
         name,
         queue: new bull(name, {
-          ...this.bullOpts,
+          prefix,
           createClient: this.createClient.bind(this),
         }),
-        prefix: this.bullOpts.prefix || 'bull',
+        prefix,
       });
 
-      this.logger.info('Added queue', name);
+      this.logger.info(`added queue ${prefix}:${name}`);
     })
-  }
-
-  public async discoverAll(): Promise<void> {
-    const keyPattern = new RegExp(`^${this.bullOpts.prefix}:([^:]+):(id|failed|active|waiting|stalled-check)$`);
-    const keyStream = this.defaultRedisClient.scanStream({
-      match: `${this.bullOpts.prefix}:*:*`,
-    });
-
-    return new Promise<void>((resolve, _) => {
-      keyStream.on('data', async (keys: string[]) => {
-        keys.forEach((key) => {
-          const match = keyPattern.exec(key);
-          if (match?.[1]) {
-            this.logger.info('new key %s', match[1]);
-            this.addToQueueSet([match[1]]);
-          }
-        })
-      })
-
-      keyStream.on('end', () => {
-        resolve();
-      });
-    }).catch((err) => {
-      this.logger.error('Error scanning redis keys: %s', err);
-    });
   }
 
   private async onJobComplete(queue: QueueData, id: string): Promise<void> {
@@ -174,33 +213,5 @@ export class MetricCollector {
       .catch((err) => {
         this.logger.error({ err, job: id }, 'unable to fetch completed job');
       });
-  }
-
-  public collectJobCompletions(): void {
-    this.queues.forEach((q) => {
-      const cb = this.onJobComplete.bind(this, q);
-      this.myListeners.add(cb);
-      q.queue.on('global:completed', cb);
-    });
-  }
-
-  public async updateAll(): Promise<void> {
-    await Promise.all(this.queues.map(q => getStats(q.prefix, q.name, q.queue, this.gauges)));
-  }
-
-  public async ping(): Promise<void> {
-    await this.defaultRedisClient.ping();
-  }
-
-  public async close(): Promise<void> {
-    this.defaultRedisClient.disconnect();
-
-    this.queues.forEach((q) => {
-      this.myListeners.forEach((l) => {
-        (q.queue as any as EventEmitter).removeListener('global:completed', l);
-      });
-    });
-
-    await Promise.all(this.queues.map(q => q.queue.close()));
   }
 }
